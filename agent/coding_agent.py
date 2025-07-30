@@ -203,10 +203,10 @@ class CodingAgent:
             task_lower = task_description.lower()
             
             if "create" in task_lower and "file" in task_lower:
-                # Extract filename from task description
+                # Extract filenames from task description
                 # Look for patterns like "file called X" or "file X"
                 words = task_description.split()
-                filename = None
+                filenames = []
                 
                 # Pattern 1: "file called filename.ext"
                 for i, word in enumerate(words):
@@ -214,42 +214,52 @@ class CodingAgent:
                         if words[i-1].lower() == "file":
                             potential_filename = words[i + 1]
                             if "." in potential_filename:  # Likely a filename with extension
-                                filename = potential_filename
-                                break
+                                filenames.append(potential_filename)
                 
                 # Pattern 2: "file filename.ext"
-                if not filename:
-                    for i, word in enumerate(words):
-                        if word.lower() == "file" and i + 1 < len(words):
+                for i, word in enumerate(words):
+                    if word.lower() == "file" and i + 1 < len(words):
+                        potential_filename = words[i + 1]
+                        if "." in potential_filename:  # Likely a filename with extension
+                            if potential_filename not in filenames:
+                                filenames.append(potential_filename)
+                
+                # Pattern 3: "another called filename.ext"
+                for i, word in enumerate(words):
+                    if word.lower() == "called" and i > 0 and i + 1 < len(words):
+                        if words[i-1].lower() == "another":
                             potential_filename = words[i + 1]
                             if "." in potential_filename:  # Likely a filename with extension
-                                filename = potential_filename
-                                break
+                                if potential_filename not in filenames:
+                                    filenames.append(potential_filename)
                 
-                if filename:
-                    print(f"\n2. Creating file: {filename}")
-                    content = ""
-                    if "hello" in task_lower and "world" in task_lower:
-                        content = 'print("Hello, World!")'
-                    elif "function" in task_lower:
-                        content = 'def main():\n    pass\n\nif __name__ == "__main__":\n    main()'
-                    elif filename.endswith('.txt'):
-                        content = "This is a text file created by the coding agent."
-                    elif filename.endswith('.json'):
-                        content = '{\n    "name": "config",\n    "version": "1.0.0"\n}'
-                    elif filename.endswith('.py'):
-                        content = 'def main():\n    print("Python file created by the coding agent")\n\nif __name__ == "__main__":\n    main()'
+                if filenames:
+                    print(f"\n2. Creating {len(filenames)} file(s): {', '.join(filenames)}")
                     
-                    # Create the file in the workspace directory
-                    full_path = str(self.workspace_dir / filename)
-                    result = self.execute_tool("create_file", path=full_path, content=content)
-                    step_count += 1
-                    
-                    if result["success"]:
-                        task_success = True
-                        print(f"✓ Successfully created {filename}")
-                    else:
-                        print(f"✗ Failed to create {filename}: {result['message']}")
+                    for filename in filenames:
+                        content = ""
+                        if "hello" in task_lower and "world" in task_lower and filename.endswith('.py'):
+                            content = 'print("Hello, World!")'
+                        elif "function" in task_lower and filename.endswith('.py'):
+                            content = 'def main():\n    pass\n\nif __name__ == "__main__":\n    main()'
+                        elif filename.endswith('.txt'):
+                            content = "This is a text file created by the coding agent."
+                        elif filename.endswith('.json'):
+                            content = '{\n    "name": "config",\n    "version": "1.0.0"\n}'
+                        elif filename.endswith('.py'):
+                            content = 'def main():\n    print("Python file created by the coding agent")\n\nif __name__ == "__main__":\n    main()'
+                        
+                        # Create the file in the workspace directory
+                        full_path = str(self.workspace_dir / filename)
+                        result = self.execute_tool("create_file", path=full_path, content=content)
+                        step_count += 1
+                        
+                        if result["success"]:
+                            task_success = True
+                            print(f"✓ Successfully created {filename}")
+                        else:
+                            print(f"✗ Failed to create {filename}: {result['message']}")
+                            task_success = False
                 else:
                     print("Could not determine filename from task description")
             
