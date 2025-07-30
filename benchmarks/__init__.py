@@ -6,5 +6,6 @@ and measure its performance.
 """
 
 from .benchmark_1 import FileCreationBenchmark
+from .benchmark_2 import LLMAgentBenchmark
 
-__all__ = ['FileCreationBenchmark'] 
+__all__ = ['FileCreationBenchmark', 'LLMAgentBenchmark'] 

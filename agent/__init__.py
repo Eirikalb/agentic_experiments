@@ -6,5 +6,23 @@ coding tasks and optimize its context.
 """
 
 from .coding_agent import CodingAgent
+from .llm_agent import (
+    LLMCodingAgent, 
+    LLMConfig, 
+    PromptConfig, 
+    ParserConfig,
+    LLMPromptEngine,
+    LLMResponseParser,
+    LLMClient
+)
 
-__all__ = ['CodingAgent'] 
+__all__ = [
+    'CodingAgent',
+    'LLMCodingAgent',
+    'LLMConfig',
+    'PromptConfig', 
+    'ParserConfig',
+    'LLMPromptEngine',
+    'LLMResponseParser',
+    'LLMClient'
+] 
