@@ -87,11 +87,34 @@ class LLMPromptEngine:
 Available tools:
 {tools_description}
 
+IMPORTANT INSTRUCTIONS:
+1. Always create ALL files mentioned in the task description
+2. For multi-step tasks, complete each step before moving to the next
+3. Verify that files are created successfully before considering the task complete
+4. Use the exact file names specified in the task
+5. Include appropriate content based on the task requirements
+6. If a task requires multiple files, create them all
+7. For complex tasks, break them down into individual steps
+
+RESPONSE FORMAT:
+Use this exact format for tool calls:
+<use_tool>
+<tool_name>create_file</tool_name>
+<parameters>
+{{
+  "path": "filename.py",
+  "content": "file content here"
+}}
+</parameters>
+</use_tool>
+
 You should:
-1. Analyze the user's request
-2. Choose the appropriate tool(s) to use
-3. Execute the tool(s) with correct parameters
-4. Provide clear feedback about what you did
+1. Analyze the user's request carefully
+2. Identify ALL required files and content
+3. Choose the appropriate tool(s) to use
+4. Execute the tool(s) with correct parameters
+5. Verify completion of each step
+6. Only indicate task completion when ALL requirements are met
 
 Always respond in the specified format and be precise with your tool selections."""
 
@@ -190,38 +213,94 @@ class LLMResponseParser:
         tool_call = {}
         
         # First try XML-style parsing (Kimi-K2 format)
-        if '<tool_use>' in response or '<use_tool>' in response:
+        if ('<tool_use>' in response or '<use_tool>' in response or 
+            any(f'<{tool}>' in response for tool in available_tools)):
             import re
-            # Extract tool name
+            
+            # Extract tool name - try multiple patterns
+            tool_name = None
+            
+            # Pattern 1: <tool_name>create_file</tool_name>
             tool_match = re.search(r'<tool_name>([^<]+)</tool_name>', response)
             if tool_match:
                 tool_name = tool_match.group(1).strip()
-                if tool_name in available_tools:
-                    tool_call['tool'] = tool_name
             
-            # Extract parameters - try both <parameters> and <param> tags
+            # Pattern 2: <create_file> or <use_tool><tool_name>create_file</tool_name>
+            if not tool_name:
+                for tool in available_tools:
+                    if f'<{tool}>' in response or f'<{tool} ' in response:
+                        tool_name = tool
+                        break
+            
+            # Pattern 3: <use_tool><tool_name>create_file</tool_name>
+            if not tool_name:
+                tool_match = re.search(r'<use_tool>\s*<tool_name>([^<]+)</tool_name>', response, re.DOTALL)
+                if tool_match:
+                    tool_name = tool_match.group(1).strip()
+            
+            if tool_name and tool_name in available_tools:
+                tool_call['tool'] = tool_name
+            
+            # Extract parameters - try multiple patterns
+            params = {}
+            
+            # Pattern 1: <parameters>{...}</parameters>
             params_match = re.search(r'<parameters>\s*(\{.*?\})\s*</parameters>', response, re.DOTALL)
-            if not params_match:
-                params_match = re.search(r'<param[^>]*>\s*(\{.*?\})\s*</param>', response, re.DOTALL)
-            if not params_match:
-                # Try to extract individual parameters from XML
-                params = {}
-                path_match = re.search(r'<param[^>]*name=["\']path["\'][^>]*>\s*([^<]+)\s*</param>', response, re.IGNORECASE)
-                if path_match:
-                    params['path'] = path_match.group(1).strip()
-                content_match = re.search(r'<param[^>]*name=["\']content["\'][^>]*>\s*([^<]+)\s*</param>', response, re.IGNORECASE)
-                if content_match:
-                    params['content'] = content_match.group(1).strip()
-                
-                if params:
-                    tool_call['parameters'] = params
-            else:
+            if params_match:
                 try:
                     params_str = params_match.group(1)
                     params = json.loads(params_str)
-                    tool_call['parameters'] = params
                 except:
                     pass
+            
+            # Pattern 2: <param name="path">value</param>
+            if not params:
+                path_match = re.search(r'<param[^>]*name=["\']path["\'][^>]*>\s*([^<]+)\s*</param>', response, re.IGNORECASE)
+                if path_match:
+                    params['path'] = path_match.group(1).strip()
+                
+                content_match = re.search(r'<param[^>]*name=["\']content["\'][^>]*>\s*([^<]+)\s*</param>', response, re.IGNORECASE)
+                if content_match:
+                    params['content'] = content_match.group(1).strip()
+            
+            # Pattern 3: <path>value</path> and <content>value</content>
+            if not params:
+                path_match = re.search(r'<path>\s*([^<]+)\s*</path>', response, re.IGNORECASE)
+                if path_match:
+                    params['path'] = path_match.group(1).strip()
+                
+                content_match = re.search(r'<content>\s*(.*?)\s*</content>', response, re.IGNORECASE | re.DOTALL)
+                if content_match:
+                    params['content'] = content_match.group(1).strip()
+            
+            # Pattern 4: Direct tool call format like <create_file><path>file.py</path><content>...</content></create_file>
+            if not params:
+                for tool in available_tools:
+                    if f'<{tool}>' in response:
+                        # Extract path and content from within the tool tags
+                        tool_pattern = f'<{tool}>(.*?)</{tool}>'
+                        tool_match = re.search(tool_pattern, response, re.DOTALL)
+                        if tool_match:
+                            tool_content = tool_match.group(1)
+                            
+                            # Extract path
+                            path_match = re.search(r'<path>\s*([^<]+)\s*</path>', tool_content, re.IGNORECASE)
+                            if path_match:
+                                params['path'] = path_match.group(1).strip()
+                            
+                            # Extract content
+                            content_match = re.search(r'<content>\s*(.*?)\s*</content>', tool_content, re.IGNORECASE | re.DOTALL)
+                            if content_match:
+                                params['content'] = content_match.group(1).strip()
+                            else:
+                                # If no content tag, the rest might be content
+                                content_parts = re.split(r'<path>[^<]*</path>', tool_content, flags=re.IGNORECASE)
+                                if len(content_parts) > 1:
+                                    params['content'] = content_parts[1].strip()
+                            break
+            
+            if params:
+                tool_call['parameters'] = params
         
         # Fallback to line-based parsing
         if not tool_call.get('tool'):
