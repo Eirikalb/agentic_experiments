@@ -1,0 +1,11 @@
+# Core dependencies for the coding agent benchmark suite
+# No external dependencies required for basic functionality
+# Built-in Python modules are used: pathlib, tempfile, shutil, json, argparse
+
+# Optional dependencies for future enhancements:
+# openai>=1.0.0  # For LLM integration
+# anthropic>=0.7.0  # For Claude integration
+# requests>=2.31.0  # For API calls
+# pytest>=7.0.0  # For testing
+# black>=23.0.0  # For code formatting
+# mypy>=1.0.0  # For type checking 
