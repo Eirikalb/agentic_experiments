@@ -504,22 +504,31 @@ class LLMCodingAgent:
             }
         
         try:
-            # Execute the tool
-            result = self.tools[tool_name](**kwargs)
+            # Change to workspace directory for file operations
+            original_cwd = os.getcwd()
+            os.chdir(str(self.workspace_dir))
             
-            # Record the action
-            action_record = {
-                "timestamp": time.time(),
-                "tool": tool_name,
-                "parameters": kwargs,
-                "result": result
-            }
-            self.action_history.append(action_record)
-            
-            # Update context after tool execution
-            self.update_context()
-            
-            return result
+            try:
+                # Execute the tool
+                result = self.tools[tool_name](**kwargs)
+                
+                # Record the action
+                action_record = {
+                    "timestamp": time.time(),
+                    "tool": tool_name,
+                    "parameters": kwargs,
+                    "result": result
+                }
+                self.action_history.append(action_record)
+                
+                # Update context after tool execution
+                self.update_context()
+                
+                return result
+                
+            finally:
+                # Always restore original working directory
+                os.chdir(original_cwd)
             
         except Exception as e:
             error_result = {
