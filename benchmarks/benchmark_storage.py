@@ -293,9 +293,9 @@ class BenchmarkStorage:
                 response = log_entry.get("response", "")
                 
                 if prompt:
-                    log_lines.append(f"Prompt (first 200 chars): {prompt[:200]}...")
+                    log_lines.append(f"Prompt: {prompt}")
                 if response:
-                    log_lines.append(f"Response (first 200 chars): {response[:200]}...")
+                    log_lines.append(f"Response: {response}")
                     
             elif log_type == "verification":
                 verification = log_entry.get("verification_result", {})

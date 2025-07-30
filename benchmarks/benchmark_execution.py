@@ -17,6 +17,7 @@ from datetime import datetime
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 from agent.llm_agent import LLMCodingAgent, ExecutionConfig
+from agent.verification_agent import VerificationAgent, VerificationConfig
 
 # Import storage system
 from benchmarks.benchmark_storage import EnhancedBenchmark, BenchmarkMetadata
@@ -25,7 +26,7 @@ from benchmarks.benchmark_storage import EnhancedBenchmark, BenchmarkMetadata
 class ExecutionBenchmark:
     """
     Benchmark for testing execution capabilities including file creation,
-    execution, dependency management, and result verification with automatic storage.
+    execution, dependency management, and result verification with automatic storage and logging.
     """
     
     def __init__(self, python_executable: str = None, enable_storage: bool = True, run_id: str = None):
@@ -78,9 +79,9 @@ class ExecutionBenchmark:
             shutil.rmtree(self.workspace_dir)
     
     def run_test(self, test_name: str, task_description: str, expected_files: List[str], 
-                 expected_execution: Dict[str, Any] = None) -> Dict[str, Any]:
+                 expected_execution: Dict[str, Any] = None, use_llm_verification: bool = True) -> Dict[str, Any]:
         """
-        Run a single test case.
+        Run a single test case with complete logging.
         
         Args:
             test_name: Name of the test
@@ -96,54 +97,178 @@ class ExecutionBenchmark:
         print(f"Task: {task_description}")
         print(f"{'='*60}")
         
-        # Create a fresh agent for this test
-        agent = LLMCodingAgent(
-            workspace_dir=str(self.workspace_dir),
-            execution_config=self.execution_config
-        )
-        
-        # Execute the task
-        result = agent.execute_task(task_description, max_steps=8)
-        
-        # Verify the results
-        verification_result = self.verify_test(expected_files, expected_execution)
-        
-        test_result = {
-            "test_name": test_name,
-            "task_description": task_description,
-            "agent_result": result,
-            "verification": verification_result,
-            "success": result["success"] and verification_result["success"]
-        }
-        
-        self.test_results.append(test_result)
-        
-        # Store the test result if storage is enabled
+        # Get logger for this test
+        test_logger = None
         if self.enable_storage and self.enhanced_benchmark:
-            workspace_path = Path(self.workspace_dir) if self.workspace_dir else None
-            self.enhanced_benchmark.store_test_result(test_result, workspace_path)
+            test_logger = self.enhanced_benchmark.get_test_logger(test_name)
+            test_logger.start_test()
+            test_logger.log_info(f"Starting test: {test_name}")
+            test_logger.log_info(f"Task: {task_description}")
+            test_logger.log_info(f"Expected files: {expected_files}")
+            if expected_execution:
+                test_logger.log_info(f"Expected execution: {expected_execution}")
         
-        # Print summary
-        status = "✓ PASS" if test_result["success"] else "✗ FAIL"
-        print(f"\n{status}: {test_name}")
-        if not test_result["success"]:
-            print(f"  Agent result: {result['message']}")
-            print(f"  Verification: {verification_result['message']}")
-        
-        return test_result
+        try:
+            # Create a fresh agent for this test
+            agent = LLMCodingAgent(
+                workspace_dir=str(self.workspace_dir),
+                execution_config=self.execution_config
+            )
+            
+            # Log agent creation
+            if test_logger:
+                test_logger.log_info(f"Created execution agent with workspace: {self.workspace_dir}")
+                test_logger.log_info(f"Python executable: {self.python_executable or 'default'}")
+                test_logger.log_info(f"Execution enabled: {self.execution_config.enable_execution}")
+                test_logger.log_info(f"Execution timeout: {self.execution_config.execution_timeout}s")
+            
+            # Execute the task
+            result = agent.execute_task(task_description, max_steps=8)
+            
+            # Log agent result
+            if test_logger:
+                test_logger.log_info(f"Agent execution completed: {result['success']}")
+                test_logger.log_info(f"Agent message: {result.get('message', 'No message')}")
+                test_logger.log_info(f"Steps taken: {result.get('steps_taken', 0)}")
+                
+                # Log agent steps if available
+                execution_history = result.get('execution_history', [])
+                if execution_history:
+                    for i, step in enumerate(execution_history, 1):
+                        test_logger.log_agent_step(
+                            step_number=i,
+                            prompt=f"Executing tool: {step.get('tool', 'unknown')}",
+                            response=f"Tool result: {step.get('result', {}).get('message', 'No message')}",
+                            tool_call={
+                                "tool": step.get('tool', 'unknown'),
+                                "parameters": step.get('parameters', {})
+                            },
+                            tool_result=step.get('result', {})
+                        )
+                else:
+                    # Fallback: create a single step log
+                    test_logger.log_agent_step(
+                        step_number=1,
+                        prompt=f"Executing task: {task_description}",
+                        response=f"Task result: {result.get('message', 'No message')}",
+                        tool_call={"tool": "execute_task", "parameters": {"task": task_description}},
+                        tool_result=result
+                    )
+            
+            # Verify the results using LLM-powered verification
+            verification_result = self.verify_test(
+                expected_files=expected_files, 
+                expected_execution=expected_execution,
+                task_description=task_description if use_llm_verification else "",
+                agent_result=result if use_llm_verification else None
+            )
+            
+            # Log verification
+            if test_logger:
+                test_logger.log_verification(verification_result)
+            
+            test_result = {
+                "test_name": test_name,
+                "task_description": task_description,
+                "agent_result": result,
+                "verification": verification_result,
+                "success": result["success"] and verification_result["success"]
+            }
+            
+            self.test_results.append(test_result)
+            
+            # Store the test result if storage is enabled
+            if self.enable_storage and self.enhanced_benchmark:
+                workspace_path = Path(self.workspace_dir) if self.workspace_dir else None
+                self.enhanced_benchmark.store_test_result(test_result, workspace_path)
+            
+            # End logging
+            if test_logger:
+                test_logger.end_test()
+            
+            # Print summary
+            status = "✓ PASS" if test_result["success"] else "✗ FAIL"
+            print(f"\n{status}: {test_name}")
+            if not test_result["success"]:
+                print(f"  Agent result: {result['message']}")
+                print(f"  Verification: {verification_result['message']}")
+            
+            return test_result
+            
+        except Exception as e:
+            # Log error
+            if test_logger:
+                test_logger.log_error(f"Test failed with exception: {str(e)}", "exception")
+                test_logger.end_test()
+            
+            # Create error result
+            error_result = {
+                "test_name": test_name,
+                "task_description": task_description,
+                "agent_result": {"success": False, "message": f"Exception: {str(e)}"},
+                "verification": {"success": False, "message": f"Exception: {str(e)}"},
+                "success": False
+            }
+            
+            self.test_results.append(error_result)
+            
+            # Store error result
+            if self.enable_storage and self.enhanced_benchmark:
+                workspace_path = Path(self.workspace_dir) if self.workspace_dir else None
+                self.enhanced_benchmark.store_test_result(error_result, workspace_path)
+            
+            print(f"\n✗ FAIL: {test_name}")
+            print(f"  Exception: {str(e)}")
+            
+            return error_result
     
-    def verify_test(self, expected_files: List[str], expected_execution: Dict[str, Any] = None) -> Dict[str, Any]:
+    def verify_test(self, expected_files: List[str], expected_execution: Dict[str, Any] = None, task_description: str = "", agent_result: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Verify that the expected files were created and optionally verify execution.
+        Uses LLM-powered verification agent for intelligent verification.
         
         Args:
-            expected_files: List of expected file paths
-            expected_execution: Expected execution results (optional)
+            expected_files: List of expected file paths (legacy support)
+            expected_execution: Expected execution results (optional, legacy support)
+            task_description: The original task description for LLM verification
+            agent_result: Results from the agent execution for LLM verification
             
         Returns:
             dict: Verification result
         """
         try:
+            # Use LLM verification if task description is provided
+            if task_description and agent_result:
+                verification_agent = VerificationAgent(
+                    workspace_dir=str(self.workspace_dir),
+                    config=VerificationConfig()
+                )
+                
+                verification_result = verification_agent.verify_task_completion(task_description, agent_result)
+                
+                # Add legacy compatibility fields
+                if verification_result.get("verification", {}).get("present_files"):
+                    verification_result["existing_files"] = verification_result["verification"]["present_files"]
+                if verification_result.get("verification", {}).get("missing_files"):
+                    verification_result["missing_files"] = verification_result["verification"]["missing_files"]
+                
+                # Add execution verification if available
+                if verification_result.get("execution_verification"):
+                    execution_results = {}
+                    for file_path, result in verification_result["execution_verification"].items():
+                        execution_results[file_path] = {
+                            "success": result.get("success", False),
+                            "stdout": result.get("stdout", ""),
+                            "stderr": result.get("stderr", ""),
+                            "return_code": result.get("return_code", -1),
+                            "duration": result.get("duration", 0)
+                        }
+                    verification_result["execution_results"] = execution_results
+                    verification_result["execution_success"] = all(r.get("success", False) for r in execution_results.values())
+                
+                return verification_result
+            
+            # Fallback to legacy verification
             missing_files = []
             existing_files = []
             
@@ -445,7 +570,29 @@ def main():
             print("\nTest Results:")
             for test in details['tests']:
                 status = "PASS" if test.get('success', False) else "FAIL"
+                log_summary = test.get('log_summary', {})
+                duration = log_summary.get('duration', 0) if log_summary else 0
+                steps = log_summary.get('agent_steps', 0) if log_summary else 0
+                errors = log_summary.get('errors', 0) if log_summary else 0
+                
                 print(f"  {test.get('test_name', 'unknown')}: {status}")
+                if log_summary:
+                    print(f"    Duration: {duration:.2f}s, Steps: {steps}, Errors: {errors}")
+                
+                # Show agent result details
+                agent_result = test.get('agent_result', {})
+                if agent_result:
+                    message = agent_result.get('message', 'No message')
+                    steps_taken = agent_result.get('steps_taken', 0)
+                    print(f"    Agent: {message} ({steps_taken} steps)")
+                
+                # Show verification details
+                verification = test.get('verification', {})
+                if verification:
+                    v_message = verification.get('message', 'No verification message')
+                    print(f"    Verification: {v_message}")
+                
+                print()  # Empty line between tests
         except ValueError as e:
             print(f"❌ Error: {e}")
         return

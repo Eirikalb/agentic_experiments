@@ -32,7 +32,7 @@ from benchmarks.benchmark_storage import EnhancedBenchmark, BenchmarkMetadata
 
 class LLMAgentBenchmark:
     """
-    Benchmark for testing LLM agent capabilities with automatic storage.
+    Benchmark for testing LLM agent capabilities with automatic storage and logging.
     """
     
     def __init__(self, api_key: str = None, enable_storage: bool = True, run_id: str = None):
@@ -72,51 +72,136 @@ class LLMAgentBenchmark:
             shutil.rmtree(self.workspace_dir)
     
     def run_test(self, test_name: str, task_description: str, expected_files: list) -> bool:
-        """Run a single test case."""
+        """Run a single test case with complete logging."""
         print(f"\n🧪 Running test: {test_name}")
         print(f"📝 Task: {task_description}")
         
-        # Create LLM agent
-        agent = LLMCodingAgent(
-            workspace_dir=str(self.workspace_dir),
-            llm_config=self.llm_config
-        )
-        
-        # Execute task
-        print(f"🤖 LLM Agent executing: {task_description}")
-        print(f"📁 Working in: {self.workspace_dir}")
-        
-        result = agent.execute_task(task_description, max_steps=5)
-        
-        # Verify results
-        success = self.verify_test(expected_files)
-        
-        # Create test result
-        test_result = {
-            "test_name": test_name,
-            "task_description": task_description,
-            "agent_result": result,
-            "verification": {
-                "success": success,
-                "expected_files": expected_files,
-                "message": "All files found" if success else "Missing files"
-            },
-            "success": result["success"] and success
-        }
-        
-        self.test_results.append(test_result)
-        
-        # Store the test result if storage is enabled
+        # Get logger for this test
+        test_logger = None
         if self.enable_storage and self.enhanced_benchmark:
-            self.enhanced_benchmark.store_test_result(test_result, self.workspace_dir)
+            test_logger = self.enhanced_benchmark.get_test_logger(test_name)
+            test_logger.start_test()
+            test_logger.log_info(f"Starting test: {test_name}")
+            test_logger.log_info(f"Task: {task_description}")
+            test_logger.log_info(f"Expected files: {expected_files}")
         
-        if success:
-            print(f"✅ {test_name}: PASSED")
-        else:
+        try:
+            # Create LLM agent
+            agent = LLMCodingAgent(
+                workspace_dir=str(self.workspace_dir),
+                llm_config=self.llm_config
+            )
+            
+            # Log agent creation
+            if test_logger:
+                test_logger.log_info(f"Created LLM agent with workspace: {self.workspace_dir}")
+                test_logger.log_info(f"Model: {self.llm_config.model}")
+                test_logger.log_info(f"API key available: {bool(self.api_key)}")
+            
+            # Execute task
+            print(f"🤖 LLM Agent executing: {task_description}")
+            print(f"📁 Working in: {self.workspace_dir}")
+            
+            result = agent.execute_task(task_description, max_steps=5)
+            
+            # Log agent result
+            if test_logger:
+                test_logger.log_info(f"Agent execution completed: {result['success']}")
+                test_logger.log_info(f"Agent message: {result.get('message', 'No message')}")
+                test_logger.log_info(f"Steps taken: {result.get('steps_taken', 0)}")
+                
+                # Log agent steps if available
+                execution_history = result.get('execution_history', [])
+                if execution_history:
+                    for i, step in enumerate(execution_history, 1):
+                        test_logger.log_agent_step(
+                            step_number=i,
+                            prompt=f"Executing tool: {step.get('tool', 'unknown')}",
+                            response=f"Tool result: {step.get('result', {}).get('message', 'No message')}",
+                            tool_call={
+                                "tool": step.get('tool', 'unknown'),
+                                "parameters": step.get('parameters', {})
+                            },
+                            tool_result=step.get('result', {})
+                        )
+                else:
+                    # Fallback: create a single step log
+                    test_logger.log_agent_step(
+                        step_number=1,
+                        prompt=f"Executing task: {task_description}",
+                        response=f"Task result: {result.get('message', 'No message')}",
+                        tool_call={"tool": "execute_task", "parameters": {"task": task_description}},
+                        tool_result=result
+                    )
+            
+            # Verify results
+            success = self.verify_test(expected_files)
+            
+            # Log verification
+            if test_logger:
+                verification_result = {
+                    "success": success,
+                    "expected_files": expected_files,
+                    "message": "All files found" if success else "Missing files"
+                }
+                test_logger.log_verification(verification_result)
+            
+            # Create test result
+            test_result = {
+                "test_name": test_name,
+                "task_description": task_description,
+                "agent_result": result,
+                "verification": {
+                    "success": success,
+                    "expected_files": expected_files,
+                    "message": "All files found" if success else "Missing files"
+                },
+                "success": result["success"] and success
+            }
+            
+            self.test_results.append(test_result)
+            
+            # Store the test result if storage is enabled
+            if self.enable_storage and self.enhanced_benchmark:
+                self.enhanced_benchmark.store_test_result(test_result, self.workspace_dir)
+            
+            # End logging
+            if test_logger:
+                test_logger.end_test()
+            
+            if success:
+                print(f"✅ {test_name}: PASSED")
+            else:
+                print(f"❌ {test_name}: FAILED")
+                print(f"   Reason: Missing files: {expected_files}")
+            
+            return success
+            
+        except Exception as e:
+            # Log error
+            if test_logger:
+                test_logger.log_error(f"Test failed with exception: {str(e)}", "exception")
+                test_logger.end_test()
+            
+            # Create error result
+            error_result = {
+                "test_name": test_name,
+                "task_description": task_description,
+                "agent_result": {"success": False, "message": f"Exception: {str(e)}"},
+                "verification": {"success": False, "message": f"Exception: {str(e)}"},
+                "success": False
+            }
+            
+            self.test_results.append(error_result)
+            
+            # Store error result
+            if self.enable_storage and self.enhanced_benchmark:
+                self.enhanced_benchmark.store_test_result(error_result, self.workspace_dir)
+            
             print(f"❌ {test_name}: FAILED")
-            print(f"   Reason: Missing files: {expected_files}")
-        
-        return success
+            print(f"   Exception: {str(e)}")
+            
+            return False
     
     def verify_test(self, expected_files: list) -> bool:
         """Verify that expected files were created."""
@@ -274,7 +359,29 @@ def main():
             print("\nTest Results:")
             for test in details['tests']:
                 status = "PASS" if test.get('success', False) else "FAIL"
+                log_summary = test.get('log_summary', {})
+                duration = log_summary.get('duration', 0) if log_summary else 0
+                steps = log_summary.get('agent_steps', 0) if log_summary else 0
+                errors = log_summary.get('errors', 0) if log_summary else 0
+                
                 print(f"  {test.get('test_name', 'unknown')}: {status}")
+                if log_summary:
+                    print(f"    Duration: {duration:.2f}s, Steps: {steps}, Errors: {errors}")
+                
+                # Show agent result details
+                agent_result = test.get('agent_result', {})
+                if agent_result:
+                    message = agent_result.get('message', 'No message')
+                    steps_taken = agent_result.get('steps_taken', 0)
+                    print(f"    Agent: {message} ({steps_taken} steps)")
+                
+                # Show verification details
+                verification = test.get('verification', {})
+                if verification:
+                    v_message = verification.get('message', 'No verification message')
+                    print(f"    Verification: {v_message}")
+                
+                print()  # Empty line between tests
         except ValueError as e:
             print(f"❌ Error: {e}")
         return

@@ -344,6 +344,10 @@ class LLMResponseParser:
                 # Map file_path to path for compatibility
                 if 'file_path' in params and 'path' not in params:
                     params['path'] = params.pop('file_path')
+                
+                # Map path to directory for list_files
+                if tool_call['tool'] == 'list_files' and 'path' in params and 'directory' not in params:
+                    params['directory'] = params.pop('path')
             return tool_call
         else:
             return self._extract_tool_call_from_text(response, available_tools)
@@ -415,6 +419,9 @@ class LLMResponseParser:
             dir_match = re.search(r'directory["\']?\s*:\s*["\']([^"\']+)["\']', text, re.IGNORECASE)
             if not dir_match:
                 dir_match = re.search(r'directory[:\s]+([^\s]+)', text, re.IGNORECASE)
+            if not dir_match:
+                # Also look for path parameter (common mistake)
+                dir_match = re.search(r'path["\']?\s*:\s*["\']([^"\']+)["\']', text, re.IGNORECASE)
             
             if dir_match:
                 params['directory'] = dir_match.group(1)
@@ -530,7 +537,10 @@ class LLMClient:
 
 class LLMCodingAgent:
     """
-    LLM-powered coding agent with configurable prompting and parsing.
+    LLM-powered coding agent that can manipulate files and execute code.
+    
+    This agent uses an LLM to orchestrate tool calling while keeping
+    prompting and parsing logic separate for optimization.
     """
     
     def __init__(self, 
@@ -543,15 +553,13 @@ class LLMCodingAgent:
         Initialize the LLM coding agent.
         
         Args:
-            workspace_dir: Directory to work in
-            llm_config: LLM configuration
-            prompt_config: Prompt configuration
-            parser_config: Parser configuration
-            execution_config: Execution configuration
+            workspace_dir: Directory where the agent will work
+            llm_config: Configuration for LLM interaction
+            prompt_config: Configuration for prompting strategy
+            parser_config: Configuration for response parsing
+            execution_config: Configuration for execution environment
         """
         self.workspace_dir = Path(workspace_dir)
-        
-        # Initialize configurations
         self.llm_config = llm_config or LLMConfig()
         self.prompt_config = prompt_config or PromptConfig()
         self.parser_config = parser_config or ParserConfig()
@@ -562,7 +570,18 @@ class LLMCodingAgent:
         self.response_parser = LLMResponseParser(self.parser_config)
         self.llm_client = LLMClient(self.llm_config)
         
-        # Tools and state
+        # Context management
+        self.context = {
+            "current_files": [],
+            "recent_actions": [],
+            "task_description": "",
+            "current_state": {}
+        }
+        
+        # Execution history for logging
+        self.execution_history = []
+        
+        # Initialize tools
         self.tools = {
             "create_file": create_file,
             "read_file": read_file,
@@ -583,50 +602,48 @@ class LLMCodingAgent:
                 "run_command": self._wrap_execution_tool(run_command),
                 "check_python_version": self._wrap_execution_tool(check_python_version)
             })
-        
-        self.action_history = []
-        self.context = {
-            "current_files": [],
-            "recent_actions": [],
-            "task_description": "",
-            "current_state": {}
-        }
     
     def _wrap_execution_tool(self, tool_func):
         """Wrap execution tools to include Python executable configuration."""
         def wrapped_tool(*args, **kwargs):
             # Add Python executable to kwargs if not already present
-            if 'python_executable' not in kwargs and self.execution_config.python_executable:
+            if self.execution_config.python_executable and 'python_executable' not in kwargs:
                 kwargs['python_executable'] = self.execution_config.python_executable
             
-            # Add timeout configuration for execution tools
-            if tool_func.__name__ in ['run_python_file', 'run_command']:
-                if 'timeout' not in kwargs:
-                    kwargs['timeout'] = self.execution_config.execution_timeout
-            elif tool_func.__name__ in ['install_package', 'install_requirements']:
-                if 'timeout' not in kwargs:
-                    kwargs['timeout'] = self.execution_config.package_install_timeout
+            # Add timeout configuration
+            if 'timeout' not in kwargs:
+                kwargs['timeout'] = self.execution_config.execution_timeout
             
             return tool_func(*args, **kwargs)
-        
         return wrapped_tool
     
     def update_context(self):
         """Update the agent's context with current file system state."""
         try:
+            # Get current file listing
             files_result = list_files(str(self.workspace_dir))
             if files_result["success"]:
                 self.context["current_files"] = files_result["items"]
             else:
                 self.context["current_files"] = []
                 
-            self.context["recent_actions"] = self.action_history[-10:]
+            # Keep only recent actions (last 10)
+            self.context["recent_actions"] = self.context.get("recent_actions", [])[-10:]
             
         except Exception as e:
             print(f"Warning: Failed to update context: {e}")
     
     def execute_tool(self, tool_name: str, **kwargs) -> Dict[str, Any]:
-        """Execute a tool with the given parameters."""
+        """
+        Execute a tool with the given parameters.
+        
+        Args:
+            tool_name: Name of the tool to execute
+            **kwargs: Parameters to pass to the tool
+            
+        Returns:
+            dict: Result of the tool execution
+        """
         if tool_name not in self.tools:
             return {
                 "success": False,
@@ -635,31 +652,51 @@ class LLMCodingAgent:
             }
         
         try:
-            # Change to workspace directory for file operations
-            original_cwd = os.getcwd()
-            os.chdir(str(self.workspace_dir))
+            # Handle parameter mapping for specific tools
+            if tool_name == "list_files":
+                # Map 'path' parameter to 'directory' for list_files
+                if "path" in kwargs and "directory" not in kwargs:
+                    kwargs["directory"] = kwargs.pop("path")
             
-            try:
-                # Execute the tool
-                result = self.tools[tool_name](**kwargs)
-                
-                # Record the action
-                action_record = {
-                    "timestamp": time.time(),
-                    "tool": tool_name,
-                    "parameters": kwargs,
-                    "result": result
-                }
-                self.action_history.append(action_record)
-                
-                # Update context after tool execution
-                self.update_context()
-                
-                return result
-                
-            finally:
-                # Always restore original working directory
-                os.chdir(original_cwd)
+            # Handle file operations to ensure they work in the workspace directory
+            if tool_name in ["create_file", "read_file", "edit_file", "delete_file", "list_files"]:
+                # For file operations, ensure paths are relative to workspace
+                if "path" in kwargs and not Path(kwargs["path"]).is_absolute():
+                    kwargs["path"] = str(self.workspace_dir / kwargs["path"])
+                if "directory" in kwargs and not Path(kwargs["directory"]).is_absolute():
+                    kwargs["directory"] = str(self.workspace_dir / kwargs["directory"])
+            
+            # For execution tools, ensure they run in the workspace directory
+            if tool_name in ["run_python_file"]:
+                if "path" in kwargs and not Path(kwargs["path"]).is_absolute():
+                    kwargs["path"] = str(self.workspace_dir / kwargs["path"])
+            
+            # Execute the tool
+            result = self.tools[tool_name](**kwargs)
+            
+            # Record the action in context
+            action_record = {
+                "timestamp": time.time(),
+                "tool": tool_name,
+                "parameters": kwargs,
+                "result": result
+            }
+            
+            if "recent_actions" not in self.context:
+                self.context["recent_actions"] = []
+            self.context["recent_actions"].append(action_record)
+            
+            # Record detailed execution step
+            execution_step = {
+                "timestamp": time.time(),
+                "tool": tool_name,
+                "parameters": kwargs,
+                "result": result,
+                "success": result.get("success", False)
+            }
+            self.execution_history.append(execution_step)
+            
+            return result
             
         except Exception as e:
             error_result = {
@@ -668,13 +705,28 @@ class LLMCodingAgent:
                 "error": str(e)
             }
             
+            # Record the error
             action_record = {
                 "timestamp": time.time(),
                 "tool": tool_name,
                 "parameters": kwargs,
                 "result": error_result
             }
-            self.action_history.append(action_record)
+            
+            if "recent_actions" not in self.context:
+                self.context["recent_actions"] = []
+            self.context["recent_actions"].append(action_record)
+            
+            # Record detailed execution step
+            execution_step = {
+                "timestamp": time.time(),
+                "tool": tool_name,
+                "parameters": kwargs,
+                "result": error_result,
+                "success": False,
+                "error": str(e)
+            }
+            self.execution_history.append(execution_step)
             
             return error_result
     
@@ -690,6 +742,7 @@ class LLMCodingAgent:
             dict: Summary of the task execution
         """
         self.context["task_description"] = task_description
+        self.execution_history = []  # Reset execution history for new task
         self.update_context()
         
         print(f"🤖 LLM Agent executing: {task_description}")
@@ -697,6 +750,7 @@ class LLMCodingAgent:
         
         step_count = 0
         task_success = False
+        start_time = time.time()
         
         try:
             while step_count < max_steps:
@@ -749,19 +803,33 @@ class LLMCodingAgent:
         
         except Exception as e:
             print(f"❌ Error during task execution: {e}")
+            end_time = time.time()
+            duration = end_time - start_time
+            
             return {
                 "success": False,
                 "message": f"Task execution failed: {str(e)}",
-                "steps_taken": step_count
+                "steps_taken": step_count,
+                "max_steps": max_steps,
+                "duration": duration,
+                "execution_history": self.execution_history,
+                "error": str(e)
             }
         
         # Final context update
         self.update_context()
         
+        # Calculate duration
+        end_time = time.time()
+        duration = end_time - start_time
+        
         return {
             "success": task_success,
             "message": f"Task completed with {'success' if task_success else 'failure'}",
             "steps_taken": step_count,
+            "max_steps": max_steps,
+            "duration": duration,
+            "execution_history": self.execution_history,
             "final_context": self.get_context_summary()
         }
     
@@ -782,10 +850,10 @@ class LLMCodingAgent:
         else:
             summary_parts.append("No files in workspace")
         
-        recent = self.context["recent_actions"]
+        recent = self.context.get("recent_actions", [])
         if recent:
             action_summaries = []
-            for action in recent[-5:]:
+            for action in recent[-5:]:  # Show last 5 actions
                 tool = action["tool"]
                 success = action["result"]["success"]
                 status = "✓" if success else "✗"
@@ -795,11 +863,10 @@ class LLMCodingAgent:
         return "\n".join(summary_parts)
     
     def get_optimization_data(self) -> Dict[str, Any]:
-        """Get data for prompt and parser optimization."""
+        """Get data for prompt optimization."""
         return {
             "prompt_history": self.prompt_engine.prompt_history,
             "parsing_history": self.response_parser.parsing_history,
-            "action_history": self.action_history,
             "context": self.context
         }
     
@@ -808,12 +875,12 @@ class LLMCodingAgent:
         return list(self.tools.keys())
     
     def reset_context(self):
-        """Reset the agent's context and action history."""
-        self.action_history = []
+        """Reset the agent's context and history."""
         self.context = {
             "current_files": [],
             "recent_actions": [],
             "task_description": "",
             "current_state": {}
         }
+        self.execution_history = []
         self.update_context()

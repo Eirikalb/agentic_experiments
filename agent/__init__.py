@@ -1,28 +1,21 @@
 """
-Agent package for the coding agent benchmark suite.
+Agent module for automated code generation and task execution.
 
-This package contains the main coding agent that uses tools to execute
-coding tasks and optimize its context.
+This module contains different types of agents that can perform coding tasks
+using various strategies and tools.
 """
 
 from .coding_agent import CodingAgent
-from .llm_agent import (
-    LLMCodingAgent, 
-    LLMConfig, 
-    PromptConfig, 
-    ParserConfig,
-    LLMPromptEngine,
-    LLMResponseParser,
-    LLMClient
-)
+from .llm_agent import LLMCodingAgent, LLMConfig, ExecutionConfig, PromptConfig, ParserConfig
+from .verification_agent import VerificationAgent, VerificationConfig
 
 __all__ = [
     'CodingAgent',
-    'LLMCodingAgent',
+    'LLMCodingAgent', 
     'LLMConfig',
+    'ExecutionConfig',
     'PromptConfig', 
     'ParserConfig',
-    'LLMPromptEngine',
-    'LLMResponseParser',
-    'LLMClient'
+    'VerificationAgent',
+    'VerificationConfig'
 ] 
