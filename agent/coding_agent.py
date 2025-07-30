@@ -45,6 +45,7 @@ class CodingAgent:
             "read_diff": read_diff
         }
         self.action_history = []
+        self.execution_history = []  # Track detailed execution steps
         self.context = {
             "current_files": [],
             "recent_actions": [],
@@ -99,8 +100,15 @@ class CodingAgent:
             }
             self.action_history.append(action_record)
             
-            # Update context after tool execution
-            self.update_context()
+            # Record detailed execution step
+            execution_step = {
+                "timestamp": time.time(),
+                "tool": tool_name,
+                "parameters": kwargs,
+                "result": result,
+                "success": result.get("success", False)
+            }
+            self.execution_history.append(execution_step)
             
             return result
             
@@ -111,7 +119,7 @@ class CodingAgent:
                 "error": str(e)
             }
             
-            # Record the failed action
+            # Record the error
             action_record = {
                 "timestamp": time.time(),
                 "tool": tool_name,
@@ -120,14 +128,25 @@ class CodingAgent:
             }
             self.action_history.append(action_record)
             
+            # Record detailed execution step
+            execution_step = {
+                "timestamp": time.time(),
+                "tool": tool_name,
+                "parameters": kwargs,
+                "result": error_result,
+                "success": False,
+                "error": str(e)
+            }
+            self.execution_history.append(execution_step)
+            
             return error_result
     
     def get_context_summary(self) -> str:
         """
-        Get a human-readable summary of the current context.
+        Get a summary of the current context.
         
         Returns:
-            str: Summary of the current state
+            str: Summary of current state
         """
         summary_parts = []
         
@@ -136,26 +155,16 @@ class CodingAgent:
             summary_parts.append(f"Task: {self.context['task_description']}")
         
         # Current files
-        files = self.context["current_files"]
-        if files:
-            file_list = [f"{item['name']} ({'file' if item['is_file'] else 'dir'})" 
-                        for item in files[:10]]  # Show first 10
-            summary_parts.append(f"Files in workspace: {', '.join(file_list)}")
-            if len(files) > 10:
-                summary_parts.append(f"... and {len(files) - 10} more items")
+        if self.context["current_files"]:
+            file_list = ", ".join([f["name"] for f in self.context["current_files"]])
+            summary_parts.append(f"Files in workspace: {file_list}")
         else:
-            summary_parts.append("No files in workspace")
+            summary_parts.append("Workspace is empty")
         
         # Recent actions
-        recent = self.context["recent_actions"]
-        if recent:
-            action_summaries = []
-            for action in recent[-5:]:  # Show last 5 actions
-                tool = action["tool"]
-                success = action["result"]["success"]
-                status = "✓" if success else "✗"
-                action_summaries.append(f"{status} {tool}")
-            summary_parts.append(f"Recent actions: {' → '.join(action_summaries)}")
+        if self.context["recent_actions"]:
+            recent_tools = [action["tool"] for action in self.context["recent_actions"][-3:]]
+            summary_parts.append(f"Recent actions: {', '.join(recent_tools)}")
         
         return "\n".join(summary_parts)
     
@@ -174,6 +183,7 @@ class CodingAgent:
             dict: Summary of the task execution
         """
         self.context["task_description"] = task_description
+        self.execution_history = []  # Reset execution history for new task
         self.update_context()
         
         print(f"Starting task: {task_description}")
@@ -181,6 +191,7 @@ class CodingAgent:
         
         step_count = 0
         task_success = False
+        start_time = time.time()
         
         try:
             # Simple heuristic-based task execution
@@ -193,7 +204,8 @@ class CodingAgent:
                 return {
                     "success": False,
                     "message": f"Failed to explore workspace: {files_result['message']}",
-                    "steps_taken": step_count
+                    "steps_taken": step_count,
+                    "execution_history": self.execution_history
                 }
             
             step_count += 1
@@ -259,56 +271,51 @@ class CodingAgent:
                             print(f"✓ Successfully created {filename}")
                         else:
                             print(f"✗ Failed to create {filename}: {result['message']}")
-                            task_success = False
-                else:
-                    print("Could not determine filename from task description")
-            
-            elif "read" in task_lower and "file" in task_lower:
-                # Extract filename from task description
-                words = task_description.split()
-                filename = None
-                for i, word in enumerate(words):
-                    if word.lower() in ["read", "show", "display"] and i + 1 < len(words):
-                        potential_filename = words[i + 1]
-                        if "." in potential_filename:
-                            filename = potential_filename
-                            break
                 
-                if filename:
-                    print(f"\n2. Reading file: {filename}")
-                    result = self.execute_tool("read_file", path=filename)
-                    step_count += 1
-                    
-                    if result["success"]:
-                        task_success = True
-                        print(f"✓ Successfully read {filename}")
-                        print(f"Content:\n{result['content']}")
-                    else:
-                        print(f"✗ Failed to read {filename}: {result['message']}")
                 else:
-                    print("Could not determine filename from task description")
+                    print("Could not identify files to create from task description")
+                    return {
+                        "success": False,
+                        "message": "Could not identify files to create from task description",
+                        "steps_taken": step_count,
+                        "execution_history": self.execution_history
+                    }
             
             else:
-                print("Task not recognized. This is where LLM integration would help.")
-                print("Available tools:", list(self.tools.keys()))
-        
+                print("Task not recognized. This agent currently only handles file creation tasks.")
+                return {
+                    "success": False,
+                    "message": "Task not recognized. This agent currently only handles file creation tasks.",
+                    "steps_taken": step_count,
+                    "execution_history": self.execution_history
+                }
+            
+            # Calculate duration
+            end_time = time.time()
+            duration = end_time - start_time
+            
+            return {
+                "success": task_success,
+                "message": "Task completed with success" if task_success else "Task failed",
+                "steps_taken": step_count,
+                "max_steps": max_steps,
+                "duration": duration,
+                "execution_history": self.execution_history
+            }
+            
         except Exception as e:
-            print(f"Error during task execution: {e}")
+            end_time = time.time()
+            duration = end_time - start_time
+            
             return {
                 "success": False,
-                "message": f"Task execution failed: {str(e)}",
-                "steps_taken": step_count
+                "message": f"Task execution failed with exception: {str(e)}",
+                "steps_taken": step_count,
+                "max_steps": max_steps,
+                "duration": duration,
+                "execution_history": self.execution_history,
+                "error": str(e)
             }
-        
-        # Final context update
-        self.update_context()
-        
-        return {
-            "success": task_success,
-            "message": f"Task completed with {'success' if task_success else 'failure'}",
-            "steps_taken": step_count,
-            "final_context": self.get_context_summary()
-        }
     
     def get_available_tools(self) -> List[str]:
         """Get list of available tool names."""
@@ -316,17 +323,30 @@ class CodingAgent:
     
     def get_tool_description(self, tool_name: str) -> str:
         """Get description of a specific tool."""
-        if tool_name in self.tools:
-            return self.tools[tool_name].__doc__ or f"No description available for {tool_name}"
-        return f"Unknown tool: {tool_name}"
+        if tool_name == "create_file":
+            return "Create a new file with optional content"
+        elif tool_name == "read_file":
+            return "Read and return file content"
+        elif tool_name == "edit_file":
+            return "Replace entire file content"
+        elif tool_name == "list_files":
+            return "List files and directories"
+        elif tool_name == "delete_file":
+            return "Delete a file"
+        elif tool_name == "apply_diff":
+            return "Apply a diff to a file"
+        elif tool_name == "read_diff":
+            return "Show file differences"
+        else:
+            return "Unknown tool"
     
     def reset_context(self):
-        """Reset the agent's context and action history."""
+        """Reset the agent's context and history."""
         self.action_history = []
+        self.execution_history = []
         self.context = {
             "current_files": [],
             "recent_actions": [],
             "task_description": "",
             "current_state": {}
-        }
-        self.update_context() 
+        } 

@@ -16,7 +16,7 @@ from dataclasses import dataclass, asdict
 # Import our components
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
-from agent.llm_agent import LLMCodingAgent, LLMConfig
+from agent.llm_agent import LLMCodingAgent, LLMConfig, ExecutionConfig
 from evaluation.task_suite import TaskSuite, TaskDefinition
 
 
@@ -46,6 +46,7 @@ class TaskResult:
     missing_files: List[str]
     extra_files: List[str]
     content_analysis: Dict[str, Any]
+    execution_verification: Dict[str, Any] = None
     error_message: Optional[str] = None
     total_duration: float = 0.0
 
@@ -70,8 +71,19 @@ class LLMAgentEvaluator:
         print(f"📝 Description: {task.description}")
         print(f"📁 Workspace: {workspace_dir}")
         
-        # Initialize agent
-        agent = LLMCodingAgent(workspace_dir=str(workspace_dir))
+        # Initialize agent with execution capabilities for execution tasks
+        execution_config = None
+        if task.category == "execution_task":
+            execution_config = ExecutionConfig(
+                enable_execution=True,
+                execution_timeout=30,
+                package_install_timeout=60
+            )
+        
+        agent = LLMCodingAgent(
+            workspace_dir=str(workspace_dir),
+            execution_config=execution_config
+        )
         
         # Collect execution steps
         execution_steps = []
@@ -175,12 +187,22 @@ class LLMAgentEvaluator:
         if task.expected_content_patterns:
             content_analysis = self._analyze_content(workspace_dir, task)
         
+        # For execution tasks, verify that the created files can be executed
+        execution_verification = {}
+        if task.category == "execution_task":
+            execution_verification = self._verify_execution(workspace_dir, task)
+        
         total_duration = time.time() - start_time
+        
+        # For execution tasks, success also depends on execution verification
+        execution_success = True
+        if task.category == "execution_task":
+            execution_success = execution_verification.get("success", False)
         
         task_result = TaskResult(
             task_id=task.id,
             task_name=task.name,
-            success=result["success"] and len(missing_files) == 0,
+            success=result["success"] and len(missing_files) == 0 and execution_success,
             steps_taken=result["steps_taken"],
             max_steps=task.max_steps,
             execution_steps=execution_steps,
@@ -189,6 +211,7 @@ class LLMAgentEvaluator:
             missing_files=missing_files,
             extra_files=extra_files,
             content_analysis=content_analysis,
+            execution_verification=execution_verification,
             error_message=result.get("message") if not result["success"] else None,
             total_duration=total_duration
         )
@@ -270,6 +293,90 @@ class LLMAgentEvaluator:
             }
         
         return analysis
+    
+    def _verify_execution(self, workspace_dir: Path, task: TaskDefinition) -> Dict[str, Any]:
+        """Verify that the created files can be executed successfully."""
+        try:
+            # Find Python files to execute
+            python_files = [f for f in task.expected_files if f.endswith('.py')]
+            
+            if not python_files:
+                return {
+                    "success": True,
+                    "message": "No Python files to execute"
+                }
+            
+            # Try to execute each Python file
+            execution_results = {}
+            all_successful = True
+            
+            for py_file in python_files:
+                file_path = workspace_dir / py_file
+                
+                if not file_path.exists():
+                    all_successful = False
+                    execution_results[py_file] = {
+                        "success": False,
+                        "message": f"File {py_file} does not exist"
+                    }
+                    continue
+                
+                # Use subprocess to execute the file
+                import subprocess
+                import sys
+                
+                try:
+                    result = subprocess.run(
+                        [sys.executable, str(file_path)],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        cwd=workspace_dir
+                    )
+                    
+                    execution_results[py_file] = {
+                        "success": result.returncode == 0,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "return_code": result.returncode
+                    }
+                    
+                    if result.returncode != 0:
+                        all_successful = False
+                        print(f"  ❌ Execution failed for {py_file}: {result.stderr}")
+                    else:
+                        print(f"  ✅ {py_file} executed successfully")
+                        if result.stdout.strip():
+                            print(f"    Output: {result.stdout.strip()}")
+                            
+                except subprocess.TimeoutExpired:
+                    execution_results[py_file] = {
+                        "success": False,
+                        "message": "Execution timed out"
+                    }
+                    all_successful = False
+                    print(f"  ❌ Execution timed out for {py_file}")
+                    
+                except Exception as e:
+                    execution_results[py_file] = {
+                        "success": False,
+                        "message": f"Execution error: {str(e)}"
+                    }
+                    all_successful = False
+                    print(f"  ❌ Execution error for {py_file}: {str(e)}")
+            
+            return {
+                "success": all_successful,
+                "execution_results": execution_results,
+                "message": f"Execution verification: {'All successful' if all_successful else 'Some failed'}"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Execution verification failed: {str(e)}"
+            }
     
     def generate_report(self) -> Dict[str, Any]:
         """Generate a comprehensive evaluation report."""

@@ -28,6 +28,10 @@ from tools.file_tools import (
     create_file, read_file, edit_file, list_files, 
     delete_file, apply_diff, read_diff
 )
+from tools.execution_tools import (
+    run_python_file, detect_imports, install_package,
+    install_requirements, run_command, check_python_version
+)
 
 
 @dataclass
@@ -44,6 +48,15 @@ class LLMConfig:
         """Load API key from environment if not provided."""
         if self.api_key is None:
             self.api_key = os.getenv('OPENROUTER_API_KEY')
+
+
+@dataclass
+class ExecutionConfig:
+    """Configuration for execution environment."""
+    python_executable: Optional[str] = None  # Path to Python interpreter
+    enable_execution: bool = True  # Whether to enable execution tools
+    execution_timeout: int = 30  # Default timeout for execution
+    package_install_timeout: int = 60  # Timeout for package installation
 
 
 @dataclass
@@ -151,7 +164,13 @@ Always respond in the specified format and be precise with your tool selections.
             "list_files": "List files and directories in a directory",
             "delete_file": "Delete a file",
             "apply_diff": "Apply a diff to a file",
-            "read_diff": "Show file differences"
+            "read_diff": "Show file differences",
+            "run_python_file": "Execute a Python file and return the output",
+            "detect_imports": "Analyze a Python file to detect its imports",
+            "install_package": "Install a Python package using pip",
+            "install_requirements": "Install packages from a requirements.txt file",
+            "run_command": "Execute a shell command",
+            "check_python_version": "Check the Python version of the interpreter"
         }
         return tool_descriptions.get(tool_name, "Unknown tool")
     
@@ -518,7 +537,8 @@ class LLMCodingAgent:
                  workspace_dir: str = ".",
                  llm_config: Optional[LLMConfig] = None,
                  prompt_config: Optional[PromptConfig] = None,
-                 parser_config: Optional[ParserConfig] = None):
+                 parser_config: Optional[ParserConfig] = None,
+                 execution_config: Optional[ExecutionConfig] = None):
         """
         Initialize the LLM coding agent.
         
@@ -527,6 +547,7 @@ class LLMCodingAgent:
             llm_config: LLM configuration
             prompt_config: Prompt configuration
             parser_config: Parser configuration
+            execution_config: Execution configuration
         """
         self.workspace_dir = Path(workspace_dir)
         
@@ -534,6 +555,7 @@ class LLMCodingAgent:
         self.llm_config = llm_config or LLMConfig()
         self.prompt_config = prompt_config or PromptConfig()
         self.parser_config = parser_config or ParserConfig()
+        self.execution_config = execution_config or ExecutionConfig()
         
         # Initialize components
         self.prompt_engine = LLMPromptEngine(self.prompt_config)
@@ -551,6 +573,17 @@ class LLMCodingAgent:
             "read_diff": read_diff
         }
         
+        # Add execution tools if enabled
+        if self.execution_config.enable_execution:
+            self.tools.update({
+                "run_python_file": self._wrap_execution_tool(run_python_file),
+                "detect_imports": self._wrap_execution_tool(detect_imports),
+                "install_package": self._wrap_execution_tool(install_package),
+                "install_requirements": self._wrap_execution_tool(install_requirements),
+                "run_command": self._wrap_execution_tool(run_command),
+                "check_python_version": self._wrap_execution_tool(check_python_version)
+            })
+        
         self.action_history = []
         self.context = {
             "current_files": [],
@@ -558,6 +591,25 @@ class LLMCodingAgent:
             "task_description": "",
             "current_state": {}
         }
+    
+    def _wrap_execution_tool(self, tool_func):
+        """Wrap execution tools to include Python executable configuration."""
+        def wrapped_tool(*args, **kwargs):
+            # Add Python executable to kwargs if not already present
+            if 'python_executable' not in kwargs and self.execution_config.python_executable:
+                kwargs['python_executable'] = self.execution_config.python_executable
+            
+            # Add timeout configuration for execution tools
+            if tool_func.__name__ in ['run_python_file', 'run_command']:
+                if 'timeout' not in kwargs:
+                    kwargs['timeout'] = self.execution_config.execution_timeout
+            elif tool_func.__name__ in ['install_package', 'install_requirements']:
+                if 'timeout' not in kwargs:
+                    kwargs['timeout'] = self.execution_config.package_install_timeout
+            
+            return tool_func(*args, **kwargs)
+        
+        return wrapped_tool
     
     def update_context(self):
         """Update the agent's context with current file system state."""
