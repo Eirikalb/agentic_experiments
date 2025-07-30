@@ -193,9 +193,6 @@ class LLMAgentEvaluator:
             total_duration=total_duration
         )
         
-        # Cleanup
-        shutil.rmtree(workspace_dir, ignore_errors=True)
-        
         return task_result
     
     def run_all_tasks(self) -> List[TaskResult]:

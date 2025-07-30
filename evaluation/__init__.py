@@ -7,11 +7,15 @@ and collecting detailed traces for prompt optimization.
 
 from .task_suite import TaskSuite, TaskDefinition
 from .evaluator import LLMAgentEvaluator, TaskResult, ExecutionStep
+from .storage import EvaluationStorage, EnhancedEvaluator, RunMetadata
 
 __all__ = [
     'TaskSuite',
     'TaskDefinition', 
     'LLMAgentEvaluator',
     'TaskResult',
-    'ExecutionStep'
+    'ExecutionStep',
+    'EvaluationStorage',
+    'EnhancedEvaluator',
+    'RunMetadata'
 ] 
